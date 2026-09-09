@@ -62,7 +62,7 @@ translations = {
     }
 }
 
-# Language setup
+# Language setup (default English)
 if "lang" not in st.session_state:
     st.session_state.lang = "en"
 
@@ -83,7 +83,7 @@ QDRANT_URL = st.secrets["QDRANT_URL"]
 QDRANT_API_KEY = st.secrets["QDRANT_API_KEY"]
 GOOGLE_DRIVE_API_KEY = st.secrets["GOOGLE_DRIVE_API_KEY"]
 GOOGLE_DRIVE_FOLDER_ID = st.secrets["GOOGLE_DRIVE_FOLDER_ID"]
-GROQ_MODEL = "llama3-8b-8192"
+GROQ_MODEL = "qwen/qwen3.8-27b"  # تم التحديث
 
 # ---------- Embeddings ----------
 @st.cache_resource
