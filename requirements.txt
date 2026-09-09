@@ -1,7 +1,7 @@
 streamlit
 requests
 google-api-python-client
-qdrant-client==1.9.0
+qdrant-client==1.7.3
 sentence-transformers
 pypdf
 python-docx
