@@ -121,7 +121,7 @@ def qdrant_delete_points_by_ids(name, ids):
     if resp.status_code not in [200, 201]:
         st.error(f"Failed to delete points: {resp.text}")
 
-def qdrant_search(name, vector, top_k=4):
+def qdrant_search(name, vector, top_k=6):
     url = f"{QDRANT_URL}/collections/{name}/points/search"
     payload = {"vector": vector, "limit": top_k, "with_payload": True}
     resp = requests.post(url, headers=QDRANT_HEADERS, json=payload)
@@ -273,7 +273,7 @@ def store_file_to_qdrant(file_bytes: bytes, file_name: str, mime_type: str):
     return True
 
 # ---------- Retrieve context ----------
-def retrieve_context(query: str, top_k: int = 4) -> str:
+def retrieve_context(query: str, top_k: int = 6) -> str:
     query_embedding = embedder.encode([query]).tolist()[0]
     results = qdrant_search(COLLECTION_NAME, query_embedding, top_k)
     contexts = []
@@ -284,17 +284,19 @@ def retrieve_context(query: str, top_k: int = 4) -> str:
 
 # ---------- Generate answer ----------
 def generate_answer(question: str, context: str) -> str:
+    language_instruction = "أجب باللغة العربية." if lang == "ar" else "Answer in English."
+
     if not context:
-        return t["no_context"]
-
-    language_instruction = ""
-    if lang == "ar":
-        language_instruction = "أجب باللغة العربية."
+        # لا يوجد سياق مسترجع - نحاول الإجابة من المعرفة العامة إذا كان السؤال قابل للحل
+        prompt = f"""You are an academic assistant. The user asked: {question}
+You do not have any specific course material in the context, but you can answer general knowledge questions or solve problems using your own knowledge.
+If the question is a math problem or exercise, solve it step by step.
+If it's asking about course-specific content, say you don't have that information.
+{language_instruction}"""
     else:
-        language_instruction = "Answer in English."
-
-    prompt = f"""You are an academic assistant for a course. Use ONLY the provided context to answer the question.
-If the answer is not in the context, say: "{t['no_context']}"
+        prompt = f"""You are an academic assistant for a course. Use the provided context to answer the question.
+If the answer is not in the context, but the question is a problem or exercise (e.g., math, physics), solve it using your own knowledge and label it as "Solution based on general knowledge".
+If the answer is not in the context and it's not a problem, say: "{t['no_context']}".
 Do not mention videos or any external content.
 {language_instruction}
 
@@ -312,8 +314,8 @@ Answer:"""
     data = {
         "model": GROQ_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1,
-        "max_tokens": 500   # تم تقليلها لتجنب خطأ 429
+        "temperature": 0.2,
+        "max_tokens": 500
     }
     response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=data)
     if response.status_code == 200:
@@ -390,8 +392,6 @@ if prompt := st.chat_input(t["chat_placeholder"]):
             if "temp_context" in st.session_state:
                 context = st.session_state.temp_context
                 answer = generate_answer(prompt, context)
-                # بعد الإجابة، يمكن مسح السياق المؤقت إذا أردت
-                # لكن نتركه حتى يرفع ملف جديد
             else:
                 context = retrieve_context(prompt)
                 answer = generate_answer(prompt, context)
