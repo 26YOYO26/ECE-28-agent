@@ -6,10 +6,6 @@ import hashlib
 import io
 from typing import List, Dict, Any
 
-# Google Drive
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
-
 # Embeddings
 from sentence_transformers import SentenceTransformer
 
@@ -31,32 +27,30 @@ translations = {
     "en": {
         "title": "Course AI Assistant",
         "sidebar_actions": "Actions",
-        "sync_button": "Sync with Google Drive",
-        "upload_label": "Upload a file to ask about",
-        "upload_button": "Process uploaded file",
+        "upload_label": "Upload a file to add to knowledge base",
+        "upload_button_save": "Save to knowledge base",
+        "upload_button_temp": "Process temporarily",
         "chat_placeholder": "Ask a question about the course...",
         "thinking": "Thinking...",
         "no_context": "I couldn't find any relevant information in the course materials.",
-        "sync_started": "Starting sync with Google Drive...",
-        "sync_completed": "Sync completed.",
         "processing": "Processing...",
-        "file_processed": "File processed. You can now ask questions about it.",
+        "file_processed_temp": "File processed. You can now ask questions about it (temporary).",
+        "file_saved": "File saved to knowledge base successfully.",
         "no_text_extracted": "No clear text could be extracted. The file may be a video or image with unclear text.",
         "language_label": "Language / اللغة",
     },
     "ar": {
         "title": "مساعد المقرر الذكي",
         "sidebar_actions": "الإجراءات",
-        "sync_button": "مزامنة مع Google Drive",
-        "upload_label": "ارفع ملفًا لتسأل عنه",
-        "upload_button": "معالجة الملف المرفوع",
+        "upload_label": "ارفع ملفًا لإضافته لقاعدة المعرفة",
+        "upload_button_save": "حفظ في قاعدة المعرفة",
+        "upload_button_temp": "معالجة مؤقتة",
         "chat_placeholder": "اسأل سؤالاً عن المقرر...",
         "thinking": "جارٍ التفكير...",
         "no_context": "لم أجد معلومات ذات صلة في مواد المقرر.",
-        "sync_started": "بدء المزامنة مع Google Drive...",
-        "sync_completed": "اكتملت المزامنة.",
         "processing": "جارٍ المعالجة...",
-        "file_processed": "تمت معالجة الملف. يمكنك الآن طرح أسئلة عنه.",
+        "file_processed_temp": "تمت معالجة الملف. يمكنك الآن طرح أسئلة عنه (مؤقت).",
+        "file_saved": "تم حفظ الملف في قاعدة المعرفة بنجاح.",
         "no_text_extracted": "تعذر استخراج نص واضح. قد يكون الملف فيديو أو صورة غير واضحة.",
         "language_label": "اللغة / Language",
     }
@@ -81,9 +75,7 @@ t = translations[lang]
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 QDRANT_URL = st.secrets["QDRANT_URL"]
 QDRANT_API_KEY = st.secrets["QDRANT_API_KEY"]
-GOOGLE_DRIVE_API_KEY = st.secrets["GOOGLE_DRIVE_API_KEY"]
-GOOGLE_DRIVE_FOLDER_ID = st.secrets["GOOGLE_DRIVE_FOLDER_ID"]
-GROQ_MODEL = "qwen/qwen3.8-27b"  # تم التحديث
+GROQ_MODEL = "qwen/qwen3.8-27b"  # يمكن تغييره إلى allam-2-7b لتجنب الحدود
 
 # ---------- Embeddings ----------
 @st.cache_resource
@@ -102,12 +94,7 @@ def qdrant_collection_exists(name):
 
 def qdrant_create_collection(name, vector_size):
     url = f"{QDRANT_URL}/collections/{name}"
-    payload = {
-        "vectors": {
-            "size": vector_size,
-            "distance": "Cosine"
-        }
-    }
+    payload = {"vectors": {"size": vector_size, "distance": "Cosine"}}
     resp = requests.put(url, headers=QDRANT_HEADERS, json=payload)
     if resp.status_code not in [200, 201]:
         st.error(f"Failed to create collection {name}: {resp.text}")
@@ -121,13 +108,7 @@ def qdrant_upsert_points(name, points):
 
 def qdrant_delete_points_by_filter(name, file_id):
     url = f"{QDRANT_URL}/collections/{name}/points/delete?wait=true"
-    payload = {
-        "filter": {
-            "must": [
-                {"key": "file_id", "match": {"value": file_id}}
-            ]
-        }
-    }
+    payload = {"filter": {"must": [{"key": "file_id", "match": {"value": file_id}}]}}
     resp = requests.post(url, headers=QDRANT_HEADERS, json=payload)
     if resp.status_code not in [200, 201]:
         st.error(f"Failed to delete points: {resp.text}")
@@ -141,11 +122,7 @@ def qdrant_delete_points_by_ids(name, ids):
 
 def qdrant_search(name, vector, top_k=4):
     url = f"{QDRANT_URL}/collections/{name}/points/search"
-    payload = {
-        "vector": vector,
-        "limit": top_k,
-        "with_payload": True
-    }
+    payload = {"vector": vector, "limit": top_k, "with_payload": True}
     resp = requests.post(url, headers=QDRANT_HEADERS, json=payload)
     if resp.status_code == 200:
         return resp.json()["result"]
@@ -163,7 +140,7 @@ def qdrant_scroll_all(name):
         st.error(f"Scroll failed: {resp.text}")
         return []
 
-# ---------- Global collection names ----------
+# ---------- Collection names ----------
 COLLECTION_NAME = "course_kb"
 SYNC_COLLECTION = "sync_state"
 
@@ -228,6 +205,7 @@ def chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> List[str
     return splitter.split_text(text)
 
 def get_doctor_name(file_name: str) -> str:
+    # نستخرج اسم الدكتور من اسم الملف (اختياري)
     base = os.path.splitext(file_name)[0]
     parts = base.replace('_', ' ').replace('-', ' ').split()
     if not parts:
@@ -241,108 +219,57 @@ def get_doctor_name(file_name: str) -> str:
                 return parts[i]
     return parts[0]
 
-# ---------- Sync from Google Drive ----------
-def sync_drive():
-    st.info(t["sync_started"])
-    service = build('drive', 'v3', developerKey=GOOGLE_DRIVE_API_KEY)
-    results = service.files().list(
-        q=f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed=false",
-        fields="files(id, name, mimeType, modifiedTime)",
-        pageSize=1000
-    ).execute()
-    drive_files = results.get('files', [])
-    st.write(f"Found {len(drive_files)} files in Drive folder.")
+def store_file_to_qdrant(file_bytes: bytes, file_name: str, mime_type: str):
+    """حفظ الملف في قاعدة المعرفة Qdrant بشكل دائم."""
+    # استخراج النص حسب النوع
+    if mime_type == 'application/pdf':
+        text = extract_text_from_pdf(file_bytes)
+    elif 'word' in mime_type:
+        text = extract_text_from_docx(file_bytes)
+    elif mime_type.startswith('text'):
+        text = extract_text_from_txt(file_bytes)
+    elif mime_type.startswith('image'):
+        text = extract_text_from_image(file_bytes)
+    else:
+        st.error("Unsupported file type.")
+        return False
 
-    # Ensure collections exist
-    if not qdrant_collection_exists(COLLECTION_NAME):
-        qdrant_create_collection(COLLECTION_NAME, 384)
-    if not qdrant_collection_exists(SYNC_COLLECTION):
-        qdrant_create_collection(SYNC_COLLECTION, 1)
+    if not text.strip():
+        st.warning(t["no_text_extracted"])
+        return False
 
-    # Get current sync state
-    db_files = {}
-    points = qdrant_scroll_all(SYNC_COLLECTION)
-    for p in points:
-        payload = p.get("payload", {})
-        db_files[payload.get("file_id")] = payload.get("modified_time")
+    # إنشاء معرف فريد للملف (hash من الاسم + الوقت)
+    unique_id = hashlib.md5(f"{file_name}_{datetime.now().isoformat()}".encode()).hexdigest()
+    doctor = get_doctor_name(file_name)
 
-    current_ids = set()
+    chunks = chunk_text(text)
+    embeddings = embedder.encode(chunks, show_progress_bar=False).tolist()
 
-    for file in drive_files:
-        file_id = file['id']
-        name = file['name']
-        mime = file['mimeType']
-        modified = file['modifiedTime']
-        current_ids.add(file_id)
+    points_to_upsert = []
+    for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
+        point_id = hashlib.md5(f"{unique_id}_{i}".encode()).hexdigest()
+        points_to_upsert.append({
+            "id": point_id,
+            "vector": emb,
+            "payload": {
+                "file_id": unique_id,
+                "file_name": file_name,
+                "doctor_name": doctor,
+                "chunk_index": i,
+                "text": chunk
+            }
+        })
 
-        if not is_supported(mime):
-            continue
+    qdrant_upsert_points(COLLECTION_NAME, points_to_upsert)
 
-        if file_id not in db_files or db_files[file_id] != modified:
-            st.write(f"Processing {name}...")
-            # Delete old vectors
-            qdrant_delete_points_by_filter(COLLECTION_NAME, file_id)
-
-            # Download file
-            request = service.files().get_media(fileId=file_id)
-            file_bytes = io.BytesIO()
-            downloader = MediaIoBaseDownload(file_bytes, request)
-            done = False
-            while not done:
-                status, done = downloader.next_chunk()
-
-            # Extract text
-            if mime == 'application/pdf':
-                text = extract_text_from_pdf(file_bytes.getvalue())
-            elif 'word' in mime:
-                text = extract_text_from_docx(file_bytes.getvalue())
-            else:
-                text = extract_text_from_txt(file_bytes.getvalue())
-
-            if not text.strip():
-                st.warning(f"{t['no_text_extracted']} ({name})")
-                continue
-
-            chunks = chunk_text(text)
-            doctor = get_doctor_name(name)
-
-            embeddings = embedder.encode(chunks, show_progress_bar=False).tolist()
-
-            points_to_upsert = []
-            for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
-                point_id = hashlib.md5(f"{file_id}_{i}".encode()).hexdigest()
-                points_to_upsert.append({
-                    "id": point_id,
-                    "vector": emb,
-                    "payload": {
-                        "file_id": file_id,
-                        "file_name": name,
-                        "doctor_name": doctor,
-                        "chunk_index": i,
-                        "text": chunk
-                    }
-                })
-            qdrant_upsert_points(COLLECTION_NAME, points_to_upsert)
-
-            # Update sync state
-            state_point_id = hashlib.md5(file_id.encode()).hexdigest()
-            qdrant_upsert_points(SYNC_COLLECTION, [{
-                "id": state_point_id,
-                "vector": [0.0],
-                "payload": {"file_id": file_id, "modified_time": modified}
-            }])
-            st.success(f"Processed {name}")
-
-    # Delete files no longer present
-    for file_id in db_files:
-        if file_id not in current_ids:
-            st.write(f"Deleting {file_id} from vector DB...")
-            qdrant_delete_points_by_filter(COLLECTION_NAME, file_id)
-            state_point_id = hashlib.md5(file_id.encode()).hexdigest()
-            qdrant_delete_points_by_ids(SYNC_COLLECTION, [state_point_id])
-            st.success(f"Deleted {file_id}")
-
-    st.success(t["sync_completed"])
+    # تحديث حالة المزامنة
+    state_point_id = hashlib.md5(unique_id.encode()).hexdigest()
+    qdrant_upsert_points(SYNC_COLLECTION, [{
+        "id": state_point_id,
+        "vector": [0.0],
+        "payload": {"file_id": unique_id, "file_name": file_name, "modified_time": datetime.now().isoformat()}
+    }])
+    return True
 
 # ---------- Retrieve context ----------
 def retrieve_context(query: str, top_k: int = 4) -> str:
@@ -385,7 +312,7 @@ Answer:"""
         "model": GROQ_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1,
-        "max_tokens": 1024
+        "max_tokens": 500   # تم تقليلها لتجنب خطأ 429
     }
     response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=data)
     if response.status_code == 200:
@@ -398,9 +325,6 @@ st.title(t["title"])
 
 with st.sidebar:
     st.header(t["sidebar_actions"])
-    if st.button(t["sync_button"]):
-        with st.spinner(t["sync_started"]):
-            sync_drive()
 
     st.markdown("---")
     st.write(t["upload_label"])
@@ -409,30 +333,45 @@ with st.sidebar:
         type=["pdf", "docx", "txt", "png", "jpg", "jpeg"],
         key="upload"
     )
-    if uploaded_file and st.button(t["upload_button"]):
-        with st.spinner(t["processing"]):
-            suffix = os.path.splitext(uploaded_file.name)[1]
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(uploaded_file.getbuffer())
-                tmp_path = tmp.name
 
-            mime = uploaded_file.type
-            if mime == 'application/pdf':
-                text = extract_text_from_pdf(open(tmp_path, 'rb').read())
-            elif 'word' in mime:
-                text = extract_text_from_docx(open(tmp_path, 'rb').read())
-            elif mime.startswith('image'):
-                text = extract_text_from_image(open(tmp_path, 'rb').read())
-            else:
-                text = extract_text_from_txt(open(tmp_path, 'rb').read())
-            os.unlink(tmp_path)
+    if uploaded_file:
+        # نحتاج لقراءة الملف مرة واحدة، لكن يمكن تخزينه في session_state لتفادي إعادة القراءة
+        if "uploaded_file_bytes" not in st.session_state or st.session_state.uploaded_file_name != uploaded_file.name:
+            st.session_state.uploaded_file_bytes = uploaded_file.getvalue()
+            st.session_state.uploaded_file_name = uploaded_file.name
+            st.session_state.uploaded_file_type = uploaded_file.type
 
-            if not text.strip():
-                st.error(t["no_text_extracted"])
-            else:
-                st.session_state["temp_context"] = text[:5000]
-                st.success(t["file_processed"])
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button(t["upload_button_save"], key="save_btn"):
+                with st.spinner(t["processing"]):
+                    success = store_file_to_qdrant(
+                        st.session_state.uploaded_file_bytes,
+                        st.session_state.uploaded_file_name,
+                        st.session_state.uploaded_file_type
+                    )
+                    if success:
+                        st.success(t["file_saved"])
+        with col2:
+            if st.button(t["upload_button_temp"], key="temp_btn"):
+                with st.spinner(t["processing"]):
+                    # معالجة مؤقتة فقط
+                    mime = st.session_state.uploaded_file_type
+                    if mime == 'application/pdf':
+                        text = extract_text_from_pdf(st.session_state.uploaded_file_bytes)
+                    elif 'word' in mime:
+                        text = extract_text_from_docx(st.session_state.uploaded_file_bytes)
+                    elif mime.startswith('image'):
+                        text = extract_text_from_image(st.session_state.uploaded_file_bytes)
+                    else:
+                        text = extract_text_from_txt(st.session_state.uploaded_file_bytes)
+                    if not text.strip():
+                        st.error(t["no_text_extracted"])
+                    else:
+                        st.session_state.temp_context = text[:5000]
+                        st.success(t["file_processed_temp"])
 
+# منطقة المحادثة
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -450,6 +389,8 @@ if prompt := st.chat_input(t["chat_placeholder"]):
             if "temp_context" in st.session_state:
                 context = st.session_state.temp_context
                 answer = generate_answer(prompt, context)
+                # بعد الإجابة، يمكن مسح السياق المؤقت إذا أردت
+                # لكن نتركه حتى يرفع ملف جديد
             else:
                 context = retrieve_context(prompt)
                 answer = generate_answer(prompt, context)
