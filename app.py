@@ -317,14 +317,14 @@ def sync_drive():
 
 def retrieve_context(query: str, top_k: int = 4) -> str:
     query_embedding = embedder.encode([query]).tolist()[0]
-    search_result = qdrant.query_points(
+    search_result = qdrant.search(
         collection_name=COLLECTION_NAME,
-        query=query_embedding,
+        query_vector=query_embedding,
         limit=top_k,
         with_payload=True
     )
     contexts = []
-    for hit in search_result.points:  # لاحظ استخدام .points
+    for hit in search_result:
         payload = hit.payload
         contexts.append(f"From {payload['file_name']} (Dr. {payload['doctor_name']}):\n{payload['text']}")
     return "\n\n".join(contexts)
