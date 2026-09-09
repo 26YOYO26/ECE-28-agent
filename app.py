@@ -24,13 +24,13 @@ import pytesseract
 from pdf2image import convert_from_path
 from PIL import Image
 
-# Chunking
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+# Chunking - FIXED IMPORT
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# ---------- إعداد الصفحة ----------
+# ---------- Page config ----------
 st.set_page_config(page_title="Course AI Assistant | مساعد المقرر", page_icon="🎓", layout="wide")
 
-# ---------- القواميس للترجمة ----------
+# ---------- Translations dictionary ----------
 translations = {
     "en": {
         "title": "Course AI Assistant",
@@ -46,7 +46,6 @@ translations = {
         "processing": "Processing...",
         "file_processed": "File processed. You can now ask questions about it.",
         "no_text_extracted": "No clear text could be extracted. The file may be a video or image with unclear text.",
-        "ask_about_file": "Ask a question about the file",
         "language_label": "Language / اللغة",
         "doctor_prefix": "Dr.",
     },
@@ -64,22 +63,21 @@ translations = {
         "processing": "جارٍ المعالجة...",
         "file_processed": "تمت معالجة الملف. يمكنك الآن طرح أسئلة عنه.",
         "no_text_extracted": "تعذر استخراج نص واضح. قد يكون الملف فيديو أو صورة غير واضحة.",
-        "ask_about_file": "اسأل عن الملف",
         "language_label": "اللغة / Language",
         "doctor_prefix": "د.",
     }
 }
 
-# ---------- إعداد اللغة ----------
+# ---------- Language setup (default English) ----------
 if "lang" not in st.session_state:
-    st.session_state.lang = "ar"  # الافتراضية عربي
+    st.session_state.lang = "en"
 
-# زر تغيير اللغة في الشريط الجانبي
+# Sidebar language selector
 with st.sidebar:
     lang = st.radio(
-        translations["ar"]["language_label"],
-        options=["ar", "en"],
-        index=0 if st.session_state.lang == "ar" else 1,
+        translations["en"]["language_label"],  # Show label in English? Actually use "Language"
+        options=["en", "ar"],
+        index=0 if st.session_state.lang == "en" else 1,
         horizontal=True,
         key="lang_selector"
     )
@@ -87,7 +85,7 @@ with st.sidebar:
 
 t = translations[lang]
 
-# ---------- إعداد العملاء ----------
+# ---------- Secrets ----------
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 QDRANT_URL = st.secrets["QDRANT_URL"]
 QDRANT_API_KEY = st.secrets["QDRANT_API_KEY"]
@@ -95,6 +93,7 @@ GOOGLE_DRIVE_API_KEY = st.secrets["GOOGLE_DRIVE_API_KEY"]
 GOOGLE_DRIVE_FOLDER_ID = st.secrets["GOOGLE_DRIVE_FOLDER_ID"]
 GROQ_MODEL = "llama3-8b-8192"
 
+# ---------- Cached clients ----------
 @st.cache_resource
 def init_clients():
     qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
@@ -103,11 +102,11 @@ def init_clients():
 
 qdrant, embedder = init_clients()
 
-# ---------- أسماء المجموعات ----------
+# Collection names
 COLLECTION_NAME = "course_kb"
 SYNC_COLLECTION = "sync_state"
 
-# ---------- دوال الاستخراج والمعالجة ----------
+# ---------- Helper functions ----------
 def is_supported(mime_type: str) -> bool:
     supported = [
         'application/pdf',
@@ -136,7 +135,6 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
         try:
             images = convert_from_path(tmp_path)
             for img in images:
-                # دعم العربية والإنجليزية في OCR
                 text += pytesseract.image_to_string(img, lang='ara+eng') + "\n"
         except Exception as e:
             st.error(f"OCR failed: {e}")
@@ -158,7 +156,6 @@ def extract_text_from_txt(file_bytes: bytes) -> str:
 
 def extract_text_from_image(file_bytes: bytes) -> str:
     image = Image.open(io.BytesIO(file_bytes))
-    # دعم العربية والإنجليزية
     return pytesseract.image_to_string(image, lang='ara+eng')
 
 def chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> List[str]:
@@ -174,7 +171,6 @@ def get_doctor_name(file_name: str) -> str:
     parts = base.replace('_', ' ').replace('-', ' ').split()
     if not parts:
         return "unknown"
-    # البحث عن بادئة "د" أو "Dr" أو "Doctor"
     prefixes = ['د', 'dr', 'doctor']
     for i, p in enumerate(parts):
         if p.lower() in prefixes:
@@ -185,7 +181,7 @@ def get_doctor_name(file_name: str) -> str:
     return parts[0]
 
 def sync_drive():
-    """مزامنة الملفات من Google Drive إلى Qdrant."""
+    """Sync files from Google Drive to Qdrant."""
     st.info(t["sync_started"])
     service = build('drive', 'v3', developerKey=GOOGLE_DRIVE_API_KEY)
     results = service.files().list(
@@ -196,7 +192,6 @@ def sync_drive():
     drive_files = results.get('files', [])
     st.write(f"Found {len(drive_files)} files in Drive folder.")
 
-    # التأكد من وجود مجموعة sync_state
     try:
         qdrant.get_collection(SYNC_COLLECTION)
     except:
@@ -205,7 +200,6 @@ def sync_drive():
             vectors_config=models.VectorParams(size=1, distance=models.Distance.COSINE)
         )
 
-    # استرجاع الملفات المعالجة سابقًا
     try:
         points, _ = qdrant.scroll(
             collection_name=SYNC_COLLECTION,
@@ -230,7 +224,6 @@ def sync_drive():
 
         if file_id not in db_files or db_files[file_id] != modified:
             st.write(f"Processing {name}...")
-            # حذف المتجهات القديمة
             qdrant.delete(
                 collection_name=COLLECTION_NAME,
                 points_selector=models.FilterSelector(
@@ -245,7 +238,6 @@ def sync_drive():
                 )
             )
 
-            # تنزيل الملف
             request = service.files().get_media(fileId=file_id)
             file_bytes = io.BytesIO()
             downloader = MediaIoBaseDownload(file_bytes, request)
@@ -253,7 +245,6 @@ def sync_drive():
             while not done:
                 status, done = downloader.next_chunk()
 
-            # استخراج النص
             if mime == 'application/pdf':
                 text = extract_text_from_pdf(file_bytes.getvalue())
             elif 'word' in mime:
@@ -268,10 +259,8 @@ def sync_drive():
             chunks = chunk_text(text)
             doctor = get_doctor_name(name)
 
-            # تضمين المقاطع
             embeddings = embedder.encode(chunks, show_progress_bar=False).tolist()
 
-            # إضافة النقاط
             points = []
             for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
                 point_id = hashlib.md5(f"{file_id}_{i}".encode()).hexdigest()
@@ -288,7 +277,6 @@ def sync_drive():
                 ))
             qdrant.upsert(collection_name=COLLECTION_NAME, points=points)
 
-            # تحديث حالة المزامنة
             dummy_vector = [0.0]
             state_point_id = hashlib.md5(file_id.encode()).hexdigest()
             qdrant.upsert(
@@ -301,7 +289,6 @@ def sync_drive():
             )
             st.success(f"Processed {name}")
 
-    # حذف الملفات المحذوفة
     for file_id in db_files:
         if file_id not in current_ids:
             st.write(f"Deleting {file_id} from vector DB...")
@@ -346,7 +333,6 @@ def generate_answer(question: str, context: str) -> str:
     if not context:
         return t["no_context"]
 
-    # نضيف تعليمة للغة الإجابة حسب اللغة المختارة
     language_instruction = ""
     if lang == "ar":
         language_instruction = "أجب باللغة العربية."
@@ -381,10 +367,9 @@ Answer:"""
     else:
         return f"Error from Groq: {response.status_code} {response.text}"
 
-# ---------- واجهة المستخدم ----------
+# ---------- UI ----------
 st.title(t["title"])
 
-# الشريط الجانبي
 with st.sidebar:
     st.header(t["sidebar_actions"])
     if st.button(t["sync_button"]):
@@ -422,7 +407,6 @@ with st.sidebar:
                 st.session_state["temp_context"] = text[:5000]
                 st.success(t["file_processed"])
 
-# منطقة المحادثة
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
