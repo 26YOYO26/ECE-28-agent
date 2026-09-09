@@ -1,6 +1,5 @@
 streamlit
 requests
-google-api-python-client
 sentence-transformers
 pypdf
 python-docx
