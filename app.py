@@ -76,7 +76,7 @@ t = translations[lang]
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 QDRANT_URL = st.secrets["QDRANT_URL"]
 QDRANT_API_KEY = st.secrets["QDRANT_API_KEY"]
-GROQ_MODEL = "qwen/qwen3.8-27b"  # يمكن تغييره إلى allam-2-7b لتجنب الحدود
+GROQ_MODEL = "openai/gpt-oss-20b"   # نموذج قوي لحل المسائل
 
 # ---------- Embeddings ----------
 @st.cache_resource
@@ -315,7 +315,7 @@ Answer:"""
         "model": GROQ_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2,
-        "max_tokens": 500
+        "max_tokens": 1000    # زيادة الحد الأقصى للاستجابة
     }
     response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=data)
     if response.status_code == 200:
