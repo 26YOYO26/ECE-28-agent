@@ -10,10 +10,6 @@ from typing import List, Dict, Any
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
-# Qdrant
-from qdrant_client import QdrantClient
-from qdrant_client.http import models
-
 # Embeddings
 from sentence_transformers import SentenceTransformer
 
@@ -24,13 +20,13 @@ import pytesseract
 from pdf2image import convert_from_path
 from PIL import Image
 
-# Chunking - FIXED IMPORT
+# Chunking
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ---------- Page config ----------
 st.set_page_config(page_title="Course AI Assistant | مساعد المقرر", page_icon="🎓", layout="wide")
 
-# ---------- Translations dictionary ----------
+# ---------- Translations ----------
 translations = {
     "en": {
         "title": "Course AI Assistant",
@@ -47,7 +43,6 @@ translations = {
         "file_processed": "File processed. You can now ask questions about it.",
         "no_text_extracted": "No clear text could be extracted. The file may be a video or image with unclear text.",
         "language_label": "Language / اللغة",
-        "doctor_prefix": "Dr.",
     },
     "ar": {
         "title": "مساعد المقرر الذكي",
@@ -64,22 +59,19 @@ translations = {
         "file_processed": "تمت معالجة الملف. يمكنك الآن طرح أسئلة عنه.",
         "no_text_extracted": "تعذر استخراج نص واضح. قد يكون الملف فيديو أو صورة غير واضحة.",
         "language_label": "اللغة / Language",
-        "doctor_prefix": "د.",
     }
 }
 
-# ---------- Language setup (default English) ----------
+# Language setup
 if "lang" not in st.session_state:
     st.session_state.lang = "en"
 
-# Sidebar language selector
 with st.sidebar:
     lang = st.radio(
-        translations["en"]["language_label"],  # Show label in English? Actually use "Language"
+        "Language / اللغة",
         options=["en", "ar"],
         index=0 if st.session_state.lang == "en" else 1,
         horizontal=True,
-        key="lang_selector"
     )
     st.session_state.lang = lang
 
@@ -93,16 +85,85 @@ GOOGLE_DRIVE_API_KEY = st.secrets["GOOGLE_DRIVE_API_KEY"]
 GOOGLE_DRIVE_FOLDER_ID = st.secrets["GOOGLE_DRIVE_FOLDER_ID"]
 GROQ_MODEL = "llama3-8b-8192"
 
-# ---------- Cached clients ----------
+# ---------- Embeddings ----------
 @st.cache_resource
-def init_clients():
-    qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-    embedder = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
-    return qdrant, embedder
+def load_embedder():
+    return SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
 
-qdrant, embedder = init_clients()
+embedder = load_embedder()
 
-# Collection names
+# ---------- Qdrant REST API helpers ----------
+QDRANT_HEADERS = {"api-key": QDRANT_API_KEY, "Content-Type": "application/json"}
+
+def qdrant_collection_exists(name):
+    url = f"{QDRANT_URL}/collections/{name}"
+    resp = requests.get(url, headers=QDRANT_HEADERS)
+    return resp.status_code == 200
+
+def qdrant_create_collection(name, vector_size):
+    url = f"{QDRANT_URL}/collections/{name}"
+    payload = {
+        "vectors": {
+            "size": vector_size,
+            "distance": "Cosine"
+        }
+    }
+    resp = requests.put(url, headers=QDRANT_HEADERS, json=payload)
+    if resp.status_code not in [200, 201]:
+        st.error(f"Failed to create collection {name}: {resp.text}")
+
+def qdrant_upsert_points(name, points):
+    url = f"{QDRANT_URL}/collections/{name}/points?wait=true"
+    payload = {"points": points}
+    resp = requests.put(url, headers=QDRANT_HEADERS, json=payload)
+    if resp.status_code not in [200, 201]:
+        st.error(f"Failed to upsert points: {resp.text}")
+
+def qdrant_delete_points_by_filter(name, file_id):
+    url = f"{QDRANT_URL}/collections/{name}/points/delete?wait=true"
+    payload = {
+        "filter": {
+            "must": [
+                {"key": "file_id", "match": {"value": file_id}}
+            ]
+        }
+    }
+    resp = requests.post(url, headers=QDRANT_HEADERS, json=payload)
+    if resp.status_code not in [200, 201]:
+        st.error(f"Failed to delete points: {resp.text}")
+
+def qdrant_delete_points_by_ids(name, ids):
+    url = f"{QDRANT_URL}/collections/{name}/points/delete?wait=true"
+    payload = {"points": ids}
+    resp = requests.post(url, headers=QDRANT_HEADERS, json=payload)
+    if resp.status_code not in [200, 201]:
+        st.error(f"Failed to delete points: {resp.text}")
+
+def qdrant_search(name, vector, top_k=4):
+    url = f"{QDRANT_URL}/collections/{name}/points/search"
+    payload = {
+        "vector": vector,
+        "limit": top_k,
+        "with_payload": True
+    }
+    resp = requests.post(url, headers=QDRANT_HEADERS, json=payload)
+    if resp.status_code == 200:
+        return resp.json()["result"]
+    else:
+        st.error(f"Search failed: {resp.text}")
+        return []
+
+def qdrant_scroll_all(name):
+    url = f"{QDRANT_URL}/collections/{name}/points/scroll"
+    payload = {"limit": 1000, "with_payload": True}
+    resp = requests.post(url, headers=QDRANT_HEADERS, json=payload)
+    if resp.status_code == 200:
+        return resp.json()["result"]["points"]
+    else:
+        st.error(f"Scroll failed: {resp.text}")
+        return []
+
+# ---------- Global collection names ----------
 COLLECTION_NAME = "course_kb"
 SYNC_COLLECTION = "sync_state"
 
@@ -180,8 +241,8 @@ def get_doctor_name(file_name: str) -> str:
                 return parts[i]
     return parts[0]
 
+# ---------- Sync from Google Drive ----------
 def sync_drive():
-    """Sync files from Google Drive to Qdrant."""
     st.info(t["sync_started"])
     service = build('drive', 'v3', developerKey=GOOGLE_DRIVE_API_KEY)
     results = service.files().list(
@@ -192,23 +253,18 @@ def sync_drive():
     drive_files = results.get('files', [])
     st.write(f"Found {len(drive_files)} files in Drive folder.")
 
-    try:
-        qdrant.get_collection(SYNC_COLLECTION)
-    except:
-        qdrant.create_collection(
-            collection_name=SYNC_COLLECTION,
-            vectors_config=models.VectorParams(size=1, distance=models.Distance.COSINE)
-        )
+    # Ensure collections exist
+    if not qdrant_collection_exists(COLLECTION_NAME):
+        qdrant_create_collection(COLLECTION_NAME, 384)
+    if not qdrant_collection_exists(SYNC_COLLECTION):
+        qdrant_create_collection(SYNC_COLLECTION, 1)
 
-    try:
-        points, _ = qdrant.scroll(
-            collection_name=SYNC_COLLECTION,
-            limit=1000,
-            with_payload=True
-        )
-        db_files = {p.payload["file_id"]: p.payload["modified_time"] for p in points}
-    except:
-        db_files = {}
+    # Get current sync state
+    db_files = {}
+    points = qdrant_scroll_all(SYNC_COLLECTION)
+    for p in points:
+        payload = p.get("payload", {})
+        db_files[payload.get("file_id")] = payload.get("modified_time")
 
     current_ids = set()
 
@@ -224,20 +280,10 @@ def sync_drive():
 
         if file_id not in db_files or db_files[file_id] != modified:
             st.write(f"Processing {name}...")
-            qdrant.delete(
-                collection_name=COLLECTION_NAME,
-                points_selector=models.FilterSelector(
-                    filter=models.Filter(
-                        must=[
-                            models.FieldCondition(
-                                key="file_id",
-                                match=models.MatchValue(value=file_id)
-                            )
-                        ]
-                    )
-                )
-            )
+            # Delete old vectors
+            qdrant_delete_points_by_filter(COLLECTION_NAME, file_id)
 
+            # Download file
             request = service.files().get_media(fileId=file_id)
             file_bytes = io.BytesIO()
             downloader = MediaIoBaseDownload(file_bytes, request)
@@ -245,6 +291,7 @@ def sync_drive():
             while not done:
                 status, done = downloader.next_chunk()
 
+            # Extract text
             if mime == 'application/pdf':
                 text = extract_text_from_pdf(file_bytes.getvalue())
             elif 'word' in mime:
@@ -261,74 +308,53 @@ def sync_drive():
 
             embeddings = embedder.encode(chunks, show_progress_bar=False).tolist()
 
-            points = []
+            points_to_upsert = []
             for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
                 point_id = hashlib.md5(f"{file_id}_{i}".encode()).hexdigest()
-                points.append(models.PointStruct(
-                    id=point_id,
-                    vector=emb,
-                    payload={
+                points_to_upsert.append({
+                    "id": point_id,
+                    "vector": emb,
+                    "payload": {
                         "file_id": file_id,
                         "file_name": name,
                         "doctor_name": doctor,
                         "chunk_index": i,
                         "text": chunk
                     }
-                ))
-            qdrant.upsert(collection_name=COLLECTION_NAME, points=points)
+                })
+            qdrant_upsert_points(COLLECTION_NAME, points_to_upsert)
 
-            dummy_vector = [0.0]
+            # Update sync state
             state_point_id = hashlib.md5(file_id.encode()).hexdigest()
-            qdrant.upsert(
-                collection_name=SYNC_COLLECTION,
-                points=[models.PointStruct(
-                    id=state_point_id,
-                    vector=dummy_vector,
-                    payload={"file_id": file_id, "modified_time": modified}
-                )]
-            )
+            qdrant_upsert_points(SYNC_COLLECTION, [{
+                "id": state_point_id,
+                "vector": [0.0],
+                "payload": {"file_id": file_id, "modified_time": modified}
+            }])
             st.success(f"Processed {name}")
 
+    # Delete files no longer present
     for file_id in db_files:
         if file_id not in current_ids:
             st.write(f"Deleting {file_id} from vector DB...")
-            qdrant.delete(
-                collection_name=COLLECTION_NAME,
-                points_selector=models.FilterSelector(
-                    filter=models.Filter(
-                        must=[
-                            models.FieldCondition(
-                                key="file_id",
-                                match=models.MatchValue(value=file_id)
-                            )
-                        ]
-                    )
-                )
-            )
-            dummy_vector = [0.0]
+            qdrant_delete_points_by_filter(COLLECTION_NAME, file_id)
             state_point_id = hashlib.md5(file_id.encode()).hexdigest()
-            qdrant.delete(
-                collection_name=SYNC_COLLECTION,
-                points_selector=[state_point_id]
-            )
+            qdrant_delete_points_by_ids(SYNC_COLLECTION, [state_point_id])
             st.success(f"Deleted {file_id}")
 
     st.success(t["sync_completed"])
 
+# ---------- Retrieve context ----------
 def retrieve_context(query: str, top_k: int = 4) -> str:
     query_embedding = embedder.encode([query]).tolist()[0]
-    search_result = qdrant.search(
-        collection_name=COLLECTION_NAME,
-        query_vector=query_embedding,
-        limit=top_k,
-        with_payload=True
-    )
+    results = qdrant_search(COLLECTION_NAME, query_embedding, top_k)
     contexts = []
-    for hit in search_result:
-        payload = hit.payload
+    for hit in results:
+        payload = hit["payload"]
         contexts.append(f"From {payload['file_name']} (Dr. {payload['doctor_name']}):\n{payload['text']}")
     return "\n\n".join(contexts)
-    
+
+# ---------- Generate answer ----------
 def generate_answer(question: str, context: str) -> str:
     if not context:
         return t["no_context"]
